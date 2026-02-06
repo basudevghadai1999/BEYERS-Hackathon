@@ -2,14 +2,13 @@
 Local seeder — reads mock_data/ from disk and pushes to CloudWatch Logs + Metrics.
 No S3 or Lambda required. Run with: python seed_local.py
 """
+
 import json
 import logging
-import sys
-import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Sequence, Tuple
+from typing import Any, Dict, Tuple
 
 import boto3
 
@@ -26,6 +25,7 @@ logger = logging.getLogger(__name__)
 # time is before those, CloudWatch rejects them (>2h future). We compute an
 # offset so the LATEST mock timestamp maps to (now_utc - 10 minutes).
 
+
 def _compute_time_offset_ms() -> int:
     """Return milliseconds to ADD to every mock timestamp so they land in the past."""
     # Find the latest timestamp across all mock files
@@ -37,7 +37,16 @@ def _compute_time_offset_ms() -> int:
             for f in log_dir.glob("*.json"):
                 with open(f) as fh:
                     raw = json.load(fh)
-                records = raw if isinstance(raw, list) else (raw.get("logs") or raw.get("entries") or raw.get("records") or [])
+                records = (
+                    raw
+                    if isinstance(raw, list)
+                    else (
+                        raw.get("logs")
+                        or raw.get("entries")
+                        or raw.get("records")
+                        or []
+                    )
+                )
                 for entry in records:
                     if isinstance(entry, dict):
                         ts = _parse_ts_millis(entry.get("timestamp"))
@@ -48,8 +57,8 @@ def _compute_time_offset_ms() -> int:
         if ts_file.exists():
             with open(ts_file) as fh:
                 data = json.load(fh)
-            for metric in (data.get("metrics") or []):
-                for pt in (metric.get("datapoints") or []):
+            for metric in data.get("metrics") or []:
+                for pt in metric.get("datapoints") or []:
                     ts = _parse_ts_millis(pt.get("timestamp"))
                     if ts and ts > latest_ms:
                         latest_ms = ts
@@ -60,10 +69,12 @@ def _compute_time_offset_ms() -> int:
     logger.info("Time offset: %+d ms (%+.1f minutes)", offset, offset / 60000)
     return offset
 
+
 TIME_OFFSET_MS = None  # computed lazily in main
 
 
 # ── Timestamp helpers ──────────────────────────────────────────────────────────
+
 
 def _parse_ts_millis(value: Any) -> int | None:
     if value is None:
@@ -103,6 +114,7 @@ def _parse_ts_datetime(value: Any) -> datetime | None:
 
 # ── Log seeding ────────────────────────────────────────────────────────────────
 
+
 def _ensure_log_group(client, name, cache):
     if name in cache:
         return False
@@ -128,7 +140,9 @@ def _ensure_log_stream(client, group, stream, cache):
 
 
 def _get_sequence_token(client, group, stream):
-    resp = client.describe_log_streams(logGroupName=group, logStreamNamePrefix=stream, limit=1)
+    resp = client.describe_log_streams(
+        logGroupName=group, logStreamNamePrefix=stream, limit=1
+    )
     streams = resp.get("logStreams", [])
     return streams[0].get("uploadSequenceToken") if streams else None
 
@@ -149,18 +163,29 @@ def seed_logs():
         for json_file in sorted(log_dir.glob("*.json")):
             with open(json_file) as f:
                 raw = json.load(f)
-            records = raw if isinstance(raw, list) else (raw.get("logs") or raw.get("entries") or raw.get("records") or [])
+            records = (
+                raw
+                if isinstance(raw, list)
+                else (raw.get("logs") or raw.get("entries") or raw.get("records") or [])
+            )
             for entry in records:
                 if not isinstance(entry, dict):
                     continue
-                instance_id = entry.get("instance_id") or entry.get("instance") or entry.get("host") or "unknown"
+                instance_id = (
+                    entry.get("instance_id")
+                    or entry.get("instance")
+                    or entry.get("host")
+                    or "unknown"
+                )
                 ts = _parse_ts_millis(entry.get("timestamp"))
                 if ts is None:
                     continue
                 ts += TIME_OFFSET_MS  # shift to valid window
                 group = LOG_GROUP_TEMPLATE.format(service=service)
                 stream = str(instance_id)
-                entries_by_stream[(group, stream)].append({"timestamp": ts, "message": json.dumps(entry, default=str)})
+                entries_by_stream[(group, stream)].append(
+                    {"timestamp": ts, "message": json.dumps(entry, default=str)}
+                )
 
     for (group, stream), events in entries_by_stream.items():
         events.sort(key=lambda e: e["timestamp"])
@@ -169,9 +194,13 @@ def seed_logs():
         _ensure_log_stream(logs_client, group, stream, stream_cache)
         # Push in batches of 10000 (CW limit)
         for i in range(0, len(events), 10000):
-            batch = events[i:i + 10000]
+            batch = events[i : i + 10000]
             token = _get_sequence_token(logs_client, group, stream)
-            payload = {"logGroupName": group, "logStreamName": stream, "logEvents": batch}
+            payload = {
+                "logGroupName": group,
+                "logStreamName": stream,
+                "logEvents": batch,
+            }
             if token:
                 payload["sequenceToken"] = token
             try:
@@ -188,6 +217,7 @@ def seed_logs():
 
 
 # ── Metric seeding ─────────────────────────────────────────────────────────────
+
 
 def seed_metrics():
     cw = boto3.client("cloudwatch", region_name=REGION)
@@ -209,7 +239,9 @@ def seed_metrics():
             namespace = metric.get("namespace", "BEYERS")
             # AWS/* namespaces are reserved — remap to custom namespace
             if namespace.startswith("AWS/") or namespace == "CWAgent":
-                namespace = f"Bayer/{service.replace('-', '_').title().replace('_', '')}"
+                namespace = (
+                    f"Bayer/{service.replace('-', '_').title().replace('_', '')}"
+                )
             metric_name = metric.get("metric_name") or metric.get("name")
             if not metric_name:
                 continue
@@ -267,6 +299,8 @@ if __name__ == "__main__":
 
     logger.info("\n── Seeding CloudWatch Metrics ──")
     svc_count, dp_count = seed_metrics()
-    logger.info("Metrics done: %d services seeded, %d datapoints pushed", svc_count, dp_count)
+    logger.info(
+        "Metrics done: %d services seeded, %d datapoints pushed", svc_count, dp_count
+    )
 
     logger.info("\n=== Seeding complete ===")

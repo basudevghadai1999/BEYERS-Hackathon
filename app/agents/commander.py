@@ -1,1 +1,229 @@
-#!/usr/bin/env python3
+"""Commander Agent — the Incident Commander orchestrator.
+
+Receives a parsed alarm context, runs PLAN → INVESTIGATE → DECIDE → ACT phases
+by delegating to sub-agents (logs, metrics, deploy) via A2A and synthesizing their findings.
+"""
+
+import datetime
+import logging
+
+from google.adk import Agent
+from google.adk.models.lite_llm import LiteLlm
+
+from app.agents.deploy_agent import deploy_agent
+from app.agents.logs_agent import logs_agent
+from app.agents.metrics_agent import metrics_agent
+from app.tools.parse_alarm import parse_alarm_event
+
+logger = logging.getLogger(__name__)
+
+# ── Commander's own tools (not delegated to sub-agents) ────────────────────────
+
+
+def parse_alarm(event: dict) -> dict:
+    """Parse a raw CloudWatch alarm EventBridge event into structured incident context.
+
+    Args:
+        event: The raw EventBridge event dictionary.
+
+    Returns:
+        Structured incident context with incident_id, service, metric_name,
+        threshold, current_values, detected_at, etc.
+    """
+    return parse_alarm_event(event)
+
+
+def compute_confidence_score(
+    logs_confidence: float,
+    metrics_confidence: float,
+    deploy_confidence: float,
+    has_timestamp_overlap: bool = False,
+    has_config_match: bool = False,
+    failed_agents: int = 0,
+) -> dict:
+    """Compute the deterministic base confidence score from agent findings.
+
+    Formula:
+      base = (logs * 0.35) + (metrics * 0.30) + (deploy * 0.35)
+      + 0.05 if timestamp overlap + 0.05 if config match
+      - 0.20 per failed agent
+
+    Args:
+        logs_confidence: Confidence from logs agent (0.0-1.0).
+        metrics_confidence: Confidence from metrics agent (0.0-1.0).
+        deploy_confidence: Confidence from deploy agent (0.0-1.0).
+        has_timestamp_overlap: True if log errors and metric anomalies overlap in time.
+        has_config_match: True if deploy config changes match the error type.
+        failed_agents: Number of agents that failed.
+
+    Returns:
+        Dict with base_score, evidence_boost, failure_penalty, and final base_confidence.
+    """
+    base = (
+        (logs_confidence * 0.35)
+        + (metrics_confidence * 0.30)
+        + (deploy_confidence * 0.35)
+    )
+    evidence_boost = 0.0
+    if has_timestamp_overlap:
+        evidence_boost += 0.05
+    if has_config_match:
+        evidence_boost += 0.05
+    failure_penalty = failed_agents * 0.20
+    final = max(0.0, min(1.0, base + evidence_boost - failure_penalty))
+    return {
+        "base_score": round(base, 3),
+        "evidence_boost": round(evidence_boost, 3),
+        "failure_penalty": round(failure_penalty, 3),
+        "base_confidence": round(final, 3),
+    }
+
+
+def generate_rca_markdown(
+    incident_id: str,
+    service: str,
+    detected_at: str,
+    root_cause: str,
+    confidence: float,
+    recommended_action: str,
+    evidence_chain: list,
+    logs_summary: str = "",
+    metrics_summary: str = "",
+    deploy_summary: str = "",
+) -> str:
+    """Generate a Root Cause Analysis report as Markdown.
+
+    Args:
+        incident_id: The incident identifier.
+        service: Affected service name.
+        detected_at: When the alarm fired.
+        root_cause: Root cause description.
+        confidence: Final confidence score (0.0-1.0).
+        recommended_action: "rollback" or "escalate".
+        evidence_chain: List of causal link strings.
+        logs_summary: Summary from logs investigation.
+        metrics_summary: Summary from metrics investigation.
+        deploy_summary: Summary from deploy investigation.
+
+    Returns:
+        Markdown string of the full RCA report.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    evidence_lines = "\n".join(
+        f"  {i + 1}. {e}" for i, e in enumerate(evidence_chain)
+    )
+
+    return f"""# Incident Report: {incident_id}
+
+## Summary
+| Field | Value |
+|-------|-------|
+| Incident ID | {incident_id} |
+| Service | {service} |
+| Detected At | {detected_at} |
+| Root Cause | {root_cause} |
+| Confidence | {confidence:.0%} |
+| Recommended Action | {recommended_action} |
+| Report Generated | {now} |
+
+## Evidence Chain
+{evidence_lines}
+
+## Log Analysis
+{logs_summary or "No log findings available."}
+
+## Metric Analysis
+{metrics_summary or "No metric findings available."}
+
+## Deployment Correlation
+{deploy_summary or "No deployment findings available."}
+
+## Recommended Action
+**{recommended_action.upper()}** — {"Roll back " + service + " to previous version" if recommended_action == "rollback" else "Escalate to human on-call team for further investigation"}
+
+## Agent Chain of Thought
+1. DETECT — Alarm received for {service}
+2. PLAN — Investigation plan generated, 3 agents dispatched via A2A
+3. INVESTIGATE — Logs, Metrics, Deploy agents analyzed data
+4. DECIDE — Root cause identified (confidence: {confidence:.0%})
+5. ACT — {recommended_action.upper()} recommended
+6. REPORT — This document generated at {now}
+
+---
+*Generated by Autonomous Incident Commander (AIC)*
+"""
+
+
+# ── Commander Agent Definition ─────────────────────────────────────────────────
+
+COMMANDER_INSTRUCTION = """You are the **Autonomous Incident Commander (AIC)** — an expert SRE orchestrator.
+
+You receive CloudWatch alarm events and coordinate a multi-phase investigation by delegating to specialized sub-agents via A2A protocol.
+
+## Your Sub-Agents
+You have 3 specialist sub-agents you MUST delegate to (use `transfer_to_agent`):
+- **logs_agent** — Analyzes CloudWatch Logs for errors and stack traces
+- **metrics_agent** — Analyzes CloudWatch Metrics for anomalies and trends
+- **deploy_agent** — Analyzes deployment/commit history for risky changes
+
+## Your Mission
+Execute these phases IN ORDER:
+
+### Phase 1: DETECT
+Call `parse_alarm` with the raw event to extract structured incident context (service, metric, threshold, values, timestamps).
+
+### Phase 2: PLAN
+Based on the parsed alarm, determine:
+- The affected service
+- A time window for investigation (extend 30 minutes BEFORE the alarm detection time)
+- Your initial hypothesis about what might be wrong
+Then state your plan clearly before delegating.
+
+### Phase 3: INVESTIGATE (A2A Delegation)
+Transfer to each sub-agent one at a time. Before each transfer, tell the agent what to investigate:
+
+1. **Transfer to `logs_agent`**: Tell it the service name, start/end timestamps, and incident_id
+2. **Transfer to `metrics_agent`**: Tell it the service name, metric names to check, start/end timestamps, and incident_id
+3. **Transfer to `deploy_agent`**: Tell it the service name, start/end timestamps (extend start to 2 hours before alarm), and incident_id
+
+Each agent will investigate using its own tools and return findings to you.
+
+### Phase 4: DECIDE
+After all 3 agents have reported back:
+1. Call `compute_confidence_score` with appropriate values based on the findings:
+   - Assign per-agent confidence (0.0-1.0) based on how strong each agent's evidence is
+   - Set has_timestamp_overlap=True if log errors and metric anomalies start around the same time
+   - Set has_config_match=True if a deployment changed configs related to the error type
+   - Count failed_agents (agents that returned errors or no findings)
+2. You may adjust the confidence by up to ±0.15 with explicit reasoning
+3. Determine root cause and recommended action:
+   - confidence >= 0.8 → "rollback"
+   - confidence < 0.8 → "escalate"
+
+### Phase 5: REPORT
+Call `generate_rca_markdown` with all findings to produce the final report. Include the full evidence chain.
+
+## Rules
+- Always complete ALL phases — never skip
+- ALWAYS delegate investigation to sub-agents — do NOT try to call their tools directly
+- Be specific — cite exact error codes, metric values, deploy IDs
+- If a sub-agent fails, note it and continue with available evidence
+- Your final response MUST include the full RCA markdown
+"""
+
+commander_agent = Agent(
+    name="commander",
+    model=LiteLlm(model="bedrock/anthropic.claude-opus-4-6-v1"),
+    instruction=COMMANDER_INSTRUCTION,
+    description="The Incident Commander — orchestrates multi-phase incident investigation by delegating to logs, metrics, and deployment sub-agents via A2A.",
+    tools=[
+        parse_alarm,
+        compute_confidence_score,
+        generate_rca_markdown,
+    ],
+    sub_agents=[
+        logs_agent,
+        metrics_agent,
+        deploy_agent,
+    ],
+)
