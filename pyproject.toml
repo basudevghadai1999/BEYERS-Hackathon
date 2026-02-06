@@ -1,0 +1,10 @@
+[project]
+name = "beyers-hackathon"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.42.43",
+    "google-adk>=1.24.0",
+]
