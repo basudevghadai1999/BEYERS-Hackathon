@@ -109,9 +109,7 @@ def generate_rca_markdown(
         Markdown string of the full RCA report.
     """
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    evidence_lines = "\n".join(
-        f"  {i + 1}. {e}" for i, e in enumerate(evidence_chain)
-    )
+    evidence_lines = "\n".join(f"  {i + 1}. {e}" for i, e in enumerate(evidence_chain))
 
     return f"""# Incident Report: {incident_id}
 

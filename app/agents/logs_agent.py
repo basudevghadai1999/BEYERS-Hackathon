@@ -2,7 +2,6 @@ import os
 import asyncio
 import time
 import boto3
-from typing import List, Dict, Any
 from dotenv import load_dotenv
 
 from google.adk.agents import LlmAgent
@@ -18,6 +17,7 @@ load_dotenv()
 
 # --- Tool: diagnose_service_errors (from main — live CW query) ---
 
+
 def diagnose_service_errors(service: str, lookback_minutes: int = 15) -> str:
     """
     SINGLE TOOL CALL:
@@ -25,7 +25,7 @@ def diagnose_service_errors(service: str, lookback_minutes: int = 15) -> str:
     2. Queries CloudWatch Logs for ERRORs.
     3. Returns ONLY the last 100 characters of the findings.
     """
-    logs_client = boto3.client('logs', region_name=os.getenv('AWS_REGION', 'us-east-1'))
+    logs_client = boto3.client("logs", region_name=os.getenv("AWS_REGION", "us-east-1"))
 
     end_time = int(time.time())
     start_time = end_time - (lookback_minutes * 60)
@@ -38,15 +38,15 @@ def diagnose_service_errors(service: str, lookback_minutes: int = 15) -> str:
             logGroupName=log_group,
             startTime=start_time,
             endTime=end_time,
-            queryString=query
+            queryString=query,
         )
-        query_id = start_res['queryId']
+        query_id = start_res["queryId"]
 
         raw_logs = []
         for _ in range(10):
             response = logs_client.get_query_results(queryId=query_id)
-            if response['status'] == 'Complete':
-                raw_logs = response.get('results', [])
+            if response["status"] == "Complete":
+                raw_logs = response.get("results", [])
                 break
             time.sleep(1)
 
@@ -55,7 +55,9 @@ def diagnose_service_errors(service: str, lookback_minutes: int = 15) -> str:
 
         combined_text = ""
         for res in raw_logs:
-            msg = next((item['value'] for item in res if item['field'] == '@message'), "")
+            msg = next(
+                (item["value"] for item in res if item["field"] == "@message"), ""
+            )
             combined_text += f" | {msg}"
 
         snippet = combined_text[-100:].strip()
@@ -66,6 +68,7 @@ def diagnose_service_errors(service: str, lookback_minutes: int = 15) -> str:
 
 
 # --- Tool: analyze_logs (structured Logs Insights query) ---
+
 
 def analyze_logs(service: str, time_window: dict, filter_pattern: str = None) -> dict:
     """Fetches logs, summarizes errors, and extracts stack traces."""
@@ -79,7 +82,7 @@ def analyze_logs(service: str, time_window: dict, filter_pattern: str = None) ->
             incident_id=time_window.get("incident_id", "INC-UNKNOWN"),
             findings=[],
             start_time=start_time,
-            error=str(e)
+            error=str(e),
         )
 
     error_summary = {}
@@ -91,7 +94,7 @@ def analyze_logs(service: str, time_window: dict, filter_pattern: str = None) ->
             error_summary[error_code] = {
                 "count": 0,
                 "first_seen": entry.get("@timestamp"),
-                "last_seen": entry.get("@timestamp")
+                "last_seen": entry.get("@timestamp"),
             }
         error_summary[error_code]["count"] += 1
         error_summary[error_code]["last_seen"] = entry.get("@timestamp")
@@ -105,13 +108,17 @@ def analyze_logs(service: str, time_window: dict, filter_pattern: str = None) ->
     findings = {
         "matched_entries": len(logs),
         "error_summary": error_summary,
-        "sample_entries": sample_entries
+        "sample_entries": sample_entries,
     }
 
     summary = None
     if logs:
-        top_errors = sorted(error_summary.items(), key=lambda x: x[1]["count"], reverse=True)[:2]
-        error_descriptions = [f"{count_info['count']}x {code}" for code, count_info in top_errors]
+        top_errors = sorted(
+            error_summary.items(), key=lambda x: x[1]["count"], reverse=True
+        )[:2]
+        error_descriptions = [
+            f"{count_info['count']}x {code}" for code, count_info in top_errors
+        ]
         summary = f"Detected {len(logs)} error logs. Top issues: {', '.join(error_descriptions)}."
 
     return build_response_envelope(
@@ -119,7 +126,7 @@ def analyze_logs(service: str, time_window: dict, filter_pattern: str = None) ->
         incident_id=time_window.get("incident_id", "INC-UNKNOWN"),
         findings=[findings] if logs else [],
         start_time=start_time,
-        summary=summary
+        summary=summary,
     )
 
 
@@ -127,6 +134,7 @@ def analyze_logs(service: str, time_window: dict, filter_pattern: str = None) ->
 
 logs_agent = LlmAgent(
     name="logs_agent",
+    model=LiteLlm(model="bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0"),
     description="Reads and analyzes CloudWatch Logs to identify errors and stack traces. Give it the service name, start time, end time, and incident_id.",
     instruction="""You are the Logs Intelligence Agent. When you receive a task:
 1. Call `analyze_logs` with the service, time_window (dict with "start", "end", "incident_id"), and optional filter_pattern.
@@ -142,8 +150,9 @@ logs_agent = LlmAgent(
 
 # --- Test Runner (from main) ---
 
+
 async def test_logs_agent():
-    print(f"Running One-Shot Sub-Agent Test...")
+    print("Running One-Shot Sub-Agent Test...")
     runner = InMemoryRunner(agent=logs_agent)
     query = "Diagnose the checkout-service."
 
@@ -154,15 +163,20 @@ async def test_logs_agent():
         print("ONE-SHOT VERIFICATION:")
 
         if isinstance(trajectory, list):
-            final_text = trajectory[-1].text if hasattr(trajectory[-1], 'text') else str(trajectory[-1])
+            final_text = (
+                trajectory[-1].text
+                if hasattr(trajectory[-1], "text")
+                else str(trajectory[-1])
+            )
         else:
-            final_text = getattr(trajectory, 'text', str(trajectory))
+            final_text = getattr(trajectory, "text", str(trajectory))
 
         print(final_text)
         print("=" * 60)
 
     except Exception as e:
         print(f"Error: {e}")
+
 
 if __name__ == "__main__":
     asyncio.run(test_logs_agent())

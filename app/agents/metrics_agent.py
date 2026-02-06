@@ -1,13 +1,16 @@
 from google.adk import Agent
+from google.adk.models.lite_llm import LiteLlm
 from app.tools.cloudwatch_metrics import get_metric_data
 from app.tools.anomaly_detector import detect_anomalies
 from app.tools.envelope import build_response_envelope
 import datetime
 
 
-def query_metrics_and_detect_anomalies(service: str, metric_names: list, time_window: dict, threshold: float = 2.0) -> dict:
+def query_metrics_and_detect_anomalies(
+    service: str, metric_names: list, time_window: dict, threshold: float = 2.0
+) -> dict:
     """Fetches metrics and detects anomalies. Returns findings for the agent to analyze."""
-    start_time = datetime.datetime.now(datetime.timezone.utc)
+    datetime.datetime.now(datetime.timezone.utc)
 
     try:
         raw_data = get_metric_data(service, metric_names, time_window)
@@ -22,20 +25,22 @@ def query_metrics_and_detect_anomalies(service: str, metric_names: list, time_wi
             base_val = analysis["baseline_mean"]
             change_factor = peak_val / base_val if base_val > 0 else 0
 
-            anomalies_detected.append({
-                "metric_name": m_name,
-                "anomaly_start": analysis["anomalies"][0]["timestamp"],
-                "baseline_avg": base_val,
-                "peak_value": peak_val,
-                "change_factor": change_factor,
-                "raw_datapoints": datapoints[-5:]
-            })
+            anomalies_detected.append(
+                {
+                    "metric_name": m_name,
+                    "anomaly_start": analysis["anomalies"][0]["timestamp"],
+                    "baseline_avg": base_val,
+                    "peak_value": peak_val,
+                    "change_factor": change_factor,
+                    "raw_datapoints": datapoints[-5:],
+                }
+            )
 
     return {
         "anomalies": anomalies_detected,
         "count": len(anomalies_detected),
         "service": service,
-        "incident_id": time_window.get("incident_id", "INC-UNKNOWN")
+        "incident_id": time_window.get("incident_id", "INC-UNKNOWN"),
     }
 
 
@@ -47,12 +52,13 @@ def submit_metrics_response(incident_id: str, findings: list, summary: str) -> d
         incident_id=incident_id,
         findings=findings,
         start_time=start_time,
-        summary=summary
+        summary=summary,
     )
 
 
 metrics_agent = Agent(
     name="metrics_agent",
+    model=LiteLlm(model="bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0"),
     description="Analyzes CloudWatch metrics to identify anomalies and degradation trends. Give it the service name, metric_names list, time_window dict, and optional threshold.",
     instruction="""You are the Metrics Intelligence Agent. When you receive a task:
 1. Call `query_metrics_and_detect_anomalies` with the service, metric_names list, time_window (dict with "start", "end", "incident_id"), and threshold.

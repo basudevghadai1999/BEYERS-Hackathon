@@ -1,11 +1,14 @@
 from google.adk import Agent
+from google.adk.models.lite_llm import LiteLlm
 from app.tools.github_deployments import get_github_deployments
 from app.tools.deploy_correlator import correlate_deploy_to_incident
 from app.tools.envelope import build_response_envelope
 import datetime
 
 
-def analyze_deployments(service: str, time_window: dict, anomaly_start: str = None) -> dict:
+def analyze_deployments(
+    service: str, time_window: dict, anomaly_start: str = None
+) -> dict:
     """Fetches GitHub commits and correlates them with the incident. Returns findings for analysis."""
     try:
         deployments = get_github_deployments(service, time_window)
@@ -19,7 +22,7 @@ def analyze_deployments(service: str, time_window: dict, anomaly_start: str = No
         "deployments_found": len(deployments),
         "correlation_results": correlation_results,
         "service": service,
-        "incident_id": time_window.get("incident_id", "INC-UNKNOWN")
+        "incident_id": time_window.get("incident_id", "INC-UNKNOWN"),
     }
 
 
@@ -31,12 +34,13 @@ def submit_deploy_response(incident_id: str, findings: list, summary: str) -> di
         incident_id=incident_id,
         findings=findings,
         start_time=start_time,
-        summary=summary
+        summary=summary,
     )
 
 
 deploy_agent = Agent(
     name="deploy_agent",
+    model=LiteLlm(model="bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0"),
     description="Analyzes GitHub commit history to identify risky deployments related to an incident. Give it the service name, time_window dict, and optional anomaly_start timestamp.",
     instruction="""You are the Deployment Intelligence Agent. When you receive a task:
 1. Call `analyze_deployments` with the service, time_window (dict with "start", "end", "incident_id"), and optional anomaly_start.

@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import os
 from typing import Any, Dict
 
 from google.adk.runners import InMemoryRunner
@@ -11,7 +10,9 @@ from google.genai import types
 
 from app.agents.commander import commander_agent
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 APP_NAME = "aic-commander"
@@ -33,15 +34,17 @@ async def _run_commander(event: dict) -> dict:
         "Execute the full incident investigation: DETECT → PLAN → INVESTIGATE → DECIDE → REPORT."
     )
 
-    content = types.Content(
-        role="user", parts=[types.Part(text=prompt)]
-    )
+    content = types.Content(role="user", parts=[types.Part(text=prompt)])
 
     final_text = ""
     async for event_response in runner.run_async(
         user_id=USER_ID, session_id=session.id, new_message=content
     ):
-        if event_response.is_final_response() and event_response.content and event_response.content.parts:
+        if (
+            event_response.is_final_response()
+            and event_response.content
+            and event_response.content.parts
+        ):
             for part in event_response.content.parts:
                 if part.text:
                     final_text += part.text
