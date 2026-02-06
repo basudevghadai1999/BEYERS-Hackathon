@@ -55,13 +55,24 @@ def query_metrics_and_detect_anomalies(service: str, metric_names: list, time_wi
     summary = None
     if anomalies_detected:
         critical_alerts = []
+        start_times = {}
         for a in anomalies_detected:
+            # Group by start time (rounded to minutes)
+            ts = a["anomaly_start"][:16]
+            start_times[ts] = start_times.get(ts, 0) + 1
+            
             if "latency" in a["metric_name"].lower() and a["peak_value"] > 2000:
                 critical_alerts.append(f"Critical: {a['metric_name']} spiked to {a['peak_value']:.2f}ms (threshold 2000ms exceeded).")
             else:
                 critical_alerts.append(f"{a['metric_name']} showed a {a['change_factor']:.1f}x increase compared to baseline.")
         
-        summary = " ".join(critical_alerts)
+        # Add correlation summary if multiple anomalies share a start time
+        correlation_note = ""
+        top_ts = max(start_times, key=start_times.get) if start_times else None
+        if top_ts and start_times[top_ts] > 1:
+            correlation_note = f" Correlation: {start_times[top_ts]} anomalies start at {top_ts}."
+            
+        summary = " ".join(critical_alerts) + correlation_note
             
     # 4. Build envelope
     return build_response_envelope(
