@@ -1,29 +1,27 @@
 from google.adk import Agent
 from google.adk.models.lite_llm import LiteLlm
-from app.tools.github_deployments import get_github_deployments
-from app.tools.deploy_correlator import correlate_deploy_to_incident
 from app.tools.envelope import build_response_envelope
 import datetime
+import boto3
+import json
 
 
-def analyze_deployments(
-    service: str, time_window: dict, anomaly_start: str = None
-) -> dict:
-    """Fetches GitHub commits and correlates them with the incident. Returns findings for analysis."""
+def fetch_deployment_logs():
+    """Fetches deployment logs (mock GitHub push event) from S3."""
+    bucket_name = "bucketrag-426313057150"
+    key = "mock_github_push_event.json"
+    s3 = boto3.client("s3")
+    
     try:
-        deployments = get_github_deployments(service, time_window)
+        response = s3.get_object(Bucket=bucket_name, Key=key)
+        data = json.loads(response["Body"].read().decode("utf-8"))
+        return {
+            "source": f"s3://{bucket_name}/{key}",
+            "deployment_data": data,
+            "status": "success"
+        }
     except Exception as e:
-        return {"error": str(e)}
-
-    ref_time = anomaly_start or time_window["end"]
-    correlation_results = correlate_deploy_to_incident(deployments, ref_time)
-
-    return {
-        "deployments_found": len(deployments),
-        "correlation_results": correlation_results,
-        "service": service,
-        "incident_id": time_window.get("incident_id", "INC-UNKNOWN"),
-    }
+        return {"error": f"Failed to fetch deployment logs from S3: {str(e)}"}
 
 
 def submit_deploy_response(incident_id: str, findings: list, summary: str) -> dict:
@@ -41,15 +39,15 @@ def submit_deploy_response(incident_id: str, findings: list, summary: str) -> di
 deploy_agent = Agent(
     name="deploy_agent",
     model=LiteLlm(model="bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0"),
-    description="Analyzes GitHub commit history to identify risky deployments related to an incident. Give it the service name, time_window dict, and optional anomaly_start timestamp.",
+    description="Analyzes deployment logs from S3 to identify potential causes of incidents.",
     instruction="""You are the Deployment Intelligence Agent. When you receive a task:
-1. Call `analyze_deployments` with the service, time_window (dict with "start", "end", "incident_id"), and optional anomaly_start.
-2. Review the 'correlation_results', especially 'highest_risk_deploy' and any 'correlations'.
-3. Analyze the commit messages and files changed to determine the risk.
-4. Generate a professional summary (e.g., "Identified risky deployment [commit_id] by [user] changing [files]...").
-5. Call `submit_deploy_response` with the 'correlations' list and your summary.
+1. Call `fetch_deployment_logs` to retrieve the latest deployment information from S3.
+2. Analyze the 'deployment_data' in the response. Look at the 'commits' list, 'pusher', and 'repository' details.
+3. Identify any risky changes (e.g., modified files, commit messages indicating fixes or features).
+4. Generate a professional summary (e.g., "Analyzed deployment logs from S3. Found push event [ref] by [pusher]. Commit [id]: [message] modified [files]...").
+5. Call `submit_deploy_response` with a list formatted as findings (can be the raw commits list or a simplified version) and your summary.
 6. After responding, you will automatically return control to the Commander.
 """,
-    tools=[analyze_deployments, submit_deploy_response],
+    tools=[fetch_deployment_logs, submit_deploy_response],
     output_key="deploy_findings",
 )
