@@ -1,0 +1,41 @@
+# Get the bearer token
+bearer_token = os.getenv("AWS_BEARER_TOKEN_BEDROCK")
+
+
+client = anthropic.AnthropicBedrock(
+    aws_region="us-east-1",  # Common Bedrock region
+)
+    
+model_ids = "us.anthropic.claude-opus-4-5-20251101-v1:0"
+    
+message = client.messages.create(
+    model=model_ids,
+    max_tokens=256,
+    messages=[
+        {"role": "user", "content": "Hello! I am Basudev."}
+    ]
+)
+print(f"Response: {message.content[0].text}")
+
+
+
+import boto3
+import os
+
+def upload_file(file_path, bucket_name, object_name=None):
+    if object_name is None:
+        object_name = os.path.basename(file_path)
+    
+    s3 = boto3.client('s3')
+    try:
+        s3.upload_file(file_path, bucket_name, object_name)
+        print(f"Successfully uploaded {file_path} to {bucket_name}/{object_name}")
+    except Exception as e:
+        print(f"Upload failed: {e}")
+
+if __name__ == "__main__":
+    # Replace with your actual file path
+    FILE_TO_UPLOAD = 'iamcrede.txt' 
+    BUCKET_NAME = 'bucketrag-426313057150'
+    
+    upload_file(FILE_TO_UPLOAD, BUCKET_NAME)

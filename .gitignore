@@ -1,1 +1,5 @@
 .venv/
+
+.antigravity/
+.env
+__pycache__/
