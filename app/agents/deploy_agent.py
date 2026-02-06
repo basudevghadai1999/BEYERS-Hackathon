@@ -6,68 +6,52 @@ import datetime
 
 def analyze_deployments(service: str, time_window: dict, anomaly_start: str = None) -> dict:
     """
-    Fetches GitHub commits and correlates them with the incident.
+    Fetches GitHub commits and correlates them with the incident. Returns findings for analysis.
     """
-    start_time = datetime.datetime.now(datetime.timezone.utc)
     
     # 1. Fetch deployments from GitHub
     try:
         deployments = get_github_deployments(service, time_window)
     except Exception as e:
-        return build_response_envelope(
-            agent_name="deploy_agent",
-            incident_id=time_window.get("incident_id", "INC-UNKNOWN"),
-            findings=[],
-            start_time=start_time,
-            error=str(e)
-        )
+        return {"error": str(e)}
         
     # 2. Correlate
     # Use incident detection time if anomaly_start is not provided
     ref_time = anomaly_start or time_window["end"]
     correlation_results = correlate_deploy_to_incident(deployments, ref_time)
     
-    # 3. Generate Detailed Smart Summary
-    summary = None
-    if correlation_results["highest_risk_deploy"]:
-        top = correlation_results["highest_risk_deploy"]
-        
-        # Extract change details from message and files
-        change_desc = top['full_details'].split("\n")[0] # Subject
-        files_str = ", ".join(top['affected_files'][:3])
-        if len(top['affected_files']) > 3:
-            files_str += f", and {len(top['affected_files']) - 3} more"
-            
-        summary = (
-            f"Last deployment identified: '{change_desc}' by **{top['author']}**. "
-            f"Service: **{top['service']}**. "
-            f"Configuration Changes: {('Files: ' + files_str) if files_str else 'No specific config files detected in commit.'}. "
-            f"Correlation score: {top['correlation_score']}."
-        )
-        
-        if top["correlation_score"] >= 0.7:
-             summary = "🚨 " + summary
-    else:
-        summary = "No recent deployments found in the specified time window."
-        
-    # 4. Build envelope
+    # Pass necessary context for the LLM to generate a summary
+    return {
+        "deployments_found": len(deployments),
+        "correlation_results": correlation_results,
+        "service": service,
+        "incident_id": time_window.get("incident_id", "INC-UNKNOWN")
+    }
+
+def submit_deploy_response(incident_id: str, findings: list, summary: str) -> dict:
+    """
+    Submits the final response with the agent's generated summary.
+    """
+    start_time = datetime.datetime.now(datetime.timezone.utc)
     return build_response_envelope(
         agent_name="deploy_agent",
-        incident_id=time_window.get("incident_id", "INC-UNKNOWN"),
-        findings=correlation_results["correlations"],
+        incident_id=incident_id,
+        findings=findings,
         start_time=start_time,
         summary=summary
     )
 
 deploy_agent = Agent(
     name="deploy_agent",
+    model="bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0",
     description="Analyzes GitHub commit history to identify risky deployments related to an incident.",
     instruction="""
     You are the Deployment Intelligence Agent. Your task is to:
-    1. Retrieve recent commits (deployments) from GitHub for the affected service.
-    2. Correlate these changes with the incident timing and reported errors.
-    3. Identify the highest-risk change (e.g., config changes, DB migrations).
-    4. Return a structured response identifying the 'risky' commit if found.
+    1. Call `analyze_deployments` to fetch and correlate commits.
+    2. Review the 'correlation_results', especially 'highest_risk_deploy' and any 'correlations'.
+    3. Analyze the commit messages and files changed to determine the risk.
+    4. Generate a professional summary (e.g., "Identified risky deployment [commit_id] by [user] changing [files]...").
+    5. Call `submit_deploy_response` with the 'correlations' list (from the previous step) and your summary.
     """,
-    tools=[analyze_deployments]
+    tools=[analyze_deployments, submit_deploy_response]
 )
